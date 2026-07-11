@@ -21,6 +21,9 @@ class EmbeddingClient:
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        # One API call embeds the whole list; response.data is returned in
+        # the same order as texts, so index i of the result always
+        # corresponds to texts[i].
         response = await self._client.embeddings.create(model=self._model, input=texts)
         logger.info(
             "embeddings.create model=%s inputs=%d usage=%s",

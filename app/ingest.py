@@ -31,7 +31,14 @@ def chunk_text(
     markup density (code/CJK text can pack far more characters per token
     than plain English).
     """
+    # Work in token space, not characters/words, so chunk size matches what
+    # the embedding model actually sees.
     tokens = _ENCODING.encode(text)
+
+    # Each new chunk starts `stride` tokens after the previous one, not
+    # `chunk_tokens` after — that's what creates the overlap. E.g. with
+    # chunk_tokens=600, overlap=80: chunk 0 covers [0:600], chunk 1 starts
+    # at 520 and covers [520:1120], etc.
     stride = chunk_tokens - overlap
 
     chunks: list[Chunk] = []
@@ -39,7 +46,7 @@ def chunk_text(
     start = 0
     while start < len(tokens):
         end = min(start + chunk_tokens, len(tokens))
-        piece = _ENCODING.decode(tokens[start:end])
+        piece = _ENCODING.decode(tokens[start:end])  # tokens back to text
         chunks.append(
             Chunk(
                 id=f"{doc_id}::{chunk_id}",
@@ -51,7 +58,7 @@ def chunk_text(
         )
         chunk_id += 1
         if end == len(tokens):
-            break
+            break  # just emitted the last (possibly short) chunk
         start += stride
 
     return chunks
@@ -65,8 +72,10 @@ async def ingest_directory(
     overlap: int = 80,
 ) -> int:
     """Loads, chunks, embeds, and upserts every document in data_dir. Returns chunk count."""
+    # 1. Load every source file into memory.
     documents = load_documents(data_dir)
 
+    # 2. Split each document into overlapping chunks (still no embeddings yet).
     all_chunks: list[Chunk] = []
     for doc_id, text in documents.items():
         all_chunks.extend(chunk_text(text, doc_id, chunk_tokens, overlap))
@@ -74,9 +83,12 @@ async def ingest_directory(
     if not all_chunks:
         return 0
 
+    # 3. Embed every chunk's text in one batched API call (cheaper/faster
+    # than one call per chunk), then attach each vector back to its chunk.
     embeddings = await embedder.embed_batch([c.text for c in all_chunks])
     for chunk, vector in zip(all_chunks, embeddings):
         chunk.embedding = vector
 
+    # 4. Hand the fully-embedded chunks to the store for indexing.
     store.upsert(all_chunks)
     return len(all_chunks)

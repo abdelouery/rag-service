@@ -46,15 +46,25 @@ class InMemoryStore:
         self._rebuild_index()
 
     def search(self, query_vec: list[float], top_k: int = 4) -> list[SearchResult]:
+        # Nothing has been ingested yet.
         if self._normalized is None or not self._ids:
             return []
 
+        # Normalize the query vector too, so the dot product below is a
+        # true cosine similarity (both sides length 1).
         query = np.asarray(query_vec, dtype=np.float32)
         query_norm = np.linalg.norm(query)
         if query_norm > 0:
             query = query / query_norm
 
+        # One matrix-vector multiply scores every stored chunk against the
+        # query at once: cosine_similarity(a, b) == dot(a, b) when a and b
+        # are both unit vectors.
         scores = self._normalized @ query
+
+        # argpartition is an O(n) "get me the top k, unsorted" — cheaper
+        # than fully sorting all scores when we only need the best few.
+        # Then argsort just those k to put them in ranked order.
         k = min(top_k, len(self._ids))
         top_indices = np.argpartition(-scores, k - 1)[:k]
         top_indices = top_indices[np.argsort(-scores[top_indices])]
@@ -65,8 +75,11 @@ class InMemoryStore:
         ]
 
     def _rebuild_index(self) -> None:
+        # Rebuilds the whole matrix from scratch on every upsert. Simple
+        # and correct; if upserts get frequent/large this is the first
+        # thing to optimize (append instead of rebuild).
         self._ids = list(self._chunks.keys())
         vectors = np.array([self._chunks[i].embedding for i in self._ids], dtype=np.float32)
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
+        norms[norms == 0] = 1.0  # avoid divide-by-zero for an all-zero embedding
         self._normalized = vectors / norms

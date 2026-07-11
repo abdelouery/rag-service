@@ -53,9 +53,14 @@ async def query(req: QueryRequest) -> QueryResponse:
     assert _embedder is not None
     assert _store is not None
 
+    # 1. Embed the question so it can be compared against stored chunk vectors.
     query_vec = await _embedder.embed(req.question)
+    
+    # 2. Retrieve the top-k most similar chunks from the vector store.
     results = _store.search(query_vec, top_k=req.top_k)
 
+    # 3. Augment: stitch retrieved chunks into a single context block, tagged
+    # with their doc/chunk id so the model (and our `sources` field) can cite them.
     context = "\n\n".join(
         f"[{r.chunk.doc_id}#{r.chunk.chunk_id}]\n{r.chunk.text}" for r in results
     )
@@ -64,8 +69,10 @@ async def query(req: QueryRequest) -> QueryResponse:
         "provided context. If the context doesn't contain the answer, say so "
         "instead of guessing."
     )
+    # Fall back to the bare question if nothing was retrieved (empty store).
     user = f"Context:\n{context}\n\nQuestion: {req.question}" if results else req.question
 
+    # 4. Generate the answer from the LLM using that context.
     answer = await _llm.generate(system=system, user=user)
     sources = [
         {"doc_id": r.chunk.doc_id, "chunk_id": r.chunk.chunk_id, "score": r.score}
