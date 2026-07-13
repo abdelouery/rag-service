@@ -9,13 +9,36 @@ from .config import Settings
 from .embeddings import EmbeddingClient
 from .ingest import ingest_directory
 from .llm import LLMClient, create_llm_client
-from .schemas import QueryRequest, QueryResponse, Source
+from .schemas import LLMAnswer, QueryRequest, QueryResponse, Source
 from .store import InMemoryStore, VectorStore
 
-# Sentinel the model is instructed to emit verbatim when the context doesn't
-# answer the question. Detecting it is a plain string check, not a semantic
-# judgment of whether the answer is actually correct — see the /query handler.
-UNGROUNDED_MESSAGE = "I don't know based on the provided context."
+# Message returned when the store has nothing to search — there's no context
+# to send the model, so we skip the round trip entirely.
+NO_CONTEXT_MESSAGE = "I don't know — no documents have been ingested to answer from."
+
+# Constrains the model's response shape via output_config.format: "answered"
+# is a field the model fills in directly, not text we pattern-match after the
+# fact (see the older sentinel-based approach this replaced).
+ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answered": {
+            "type": "boolean",
+            "description": "true only if the provided context contains enough information to answer the question",
+        },
+        "answer": {
+            "type": "string",
+            "description": "the answer grounded in the context, or a brief note on what's missing if answered is false",
+        },
+        "citations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "doc_id#chunk_id identifiers of the chunks actually used to support the answer; empty if answered is false",
+        },
+    },
+    "required": ["answered", "answer", "citations"],
+    "additionalProperties": False,
+}
 
 settings = Settings()
 logging.basicConfig(
@@ -74,30 +97,24 @@ async def query(req: QueryRequest) -> QueryResponse:
         "You are a helpful assistant. Answer the question using ONLY the "
         "information in the context chunks below — do not use outside knowledge, "
         "even if you know the answer. Every claim you make must be supported by "
-        "the context. Cite the chunks you used inline right after the claim they "
-        "support, like [doc_id#chunk_id].\n\n"
-        f'If the context does not contain enough information to answer, respond '
-        f'with exactly this sentence and nothing else: "{UNGROUNDED_MESSAGE}"'
+        "the context. Set `answered` to false if the context doesn't contain "
+        "enough information to answer, rather than guessing or partially "
+        "answering. List the doc_id#chunk_id of every chunk you actually used "
+        "in `citations`."
     )
-    # Fall back to the sentinel directly if nothing was retrieved — there's no
-    # context to send the model, so skip the round trip.
     if results:
         user = f"Context:\n{context}\n\nQuestion: {req.question}"
-        answer = await _llm.generate(system=system, user=user)
+        raw = await _llm.generate_structured(system=system, user=user, schema=ANSWER_SCHEMA)
+        # Validated against LLMAnswer rather than trusted as-is: output_config.format
+        # guarantees the JSON matches the schema's types, but doesn't guarantee the
+        # model didn't, say, hallucinate a citation string in some other shape.
+        llm_answer = LLMAnswer.model_validate(raw)
+        answer = llm_answer.answer
+        grounded = llm_answer.answered
     else:
-        answer = UNGROUNDED_MESSAGE
+        answer = NO_CONTEXT_MESSAGE
+        grounded = False
 
-    # Detecting "ungrounded" is a case-insensitive prefix match on the sentinel
-    # we told the model to emit — not a semantic check of the answer's
-    # correctness. This is fragile: it breaks if the model paraphrases the
-    # refusal instead of quoting it verbatim, wraps it in extra text (e.g. "I
-    # don't know based on the provided context, but generally..."), or emits
-    # it after giving a partial answer anyway. A more robust approach would
-    # use structured output (e.g. a `{"answered": bool, "answer": str}` schema)
-    # so groundedness is a field the model fills in rather than text we parse.
-    grounded = bool(results) and not answer.strip().lower().startswith(
-        UNGROUNDED_MESSAGE.lower()
-    )
     sources = [
         Source(doc_id=r.chunk.doc_id, chunk_id=r.chunk.chunk_id, score=r.score, text=r.chunk.text)
         for r in results
