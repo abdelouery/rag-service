@@ -16,3 +16,8 @@ class Settings(BaseSettings):
     chunk_overlap: int = 80
 
     log_level: str = "INFO"
+
+    vector_store: str = "in_memory"  # "in_memory" or "qdrant"
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "rag_chunks"
+    qdrant_vector_size: int = 1536  # must match embedding_model's output dimension

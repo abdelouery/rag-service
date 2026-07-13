@@ -10,7 +10,7 @@ from .embeddings import EmbeddingClient
 from .ingest import ingest_directory
 from .llm import LLMClient, create_llm_client
 from .schemas import LLMAnswer, QueryRequest, QueryResponse, Source
-from .store import InMemoryStore, VectorStore
+from .store import VectorStore, create_store
 
 # Message returned when the store has nothing to search — there's no context
 # to send the model, so we skip the round trip entirely.
@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _llm, _embedder, _store
     _llm = create_llm_client(settings)
     _embedder = EmbeddingClient(settings)
-    _store = InMemoryStore()
+    _store = create_store(settings)
 
     data_dir = Path(settings.data_dir)
     if data_dir.exists():
@@ -84,6 +84,8 @@ async def query(req: QueryRequest) -> QueryResponse:
 
     # 1. Embed the question so it can be compared against stored chunk vectors.
     query_vec = await _embedder.embed(req.question)
+
+    logger.info('query_vec=%s', query_vec)
     
     # 2. Retrieve the top-k most similar chunks from the vector store.
     results = _store.search(query_vec, top_k=req.top_k)
