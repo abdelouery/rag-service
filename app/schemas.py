@@ -6,7 +6,14 @@ class QueryRequest(BaseModel):
     top_k: int = 4
 
 
+class Source(BaseModel):
+    doc_id: str
+    chunk_id: int
+    score: float
+    text: str
+
+
 class QueryResponse(BaseModel):
     answer: str
-    sources: list = []
+    sources: list[Source] = []
     grounded: bool = True
